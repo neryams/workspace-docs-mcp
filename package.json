@@ -1,0 +1,46 @@
+{
+  "name": "journal-rag",
+  "version": "0.1.0",
+  "description": "Source-control-friendly keyword MCP server + CLI over markdown journals. No vector DB, no embeddings: heading-chunked BM25 + regex, index built in-memory.",
+  "type": "module",
+  "bin": {
+    "journal": "dist/cli.js",
+    "journal-mcp": "dist/server.js"
+  },
+  "main": "dist/server.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/server.js",
+    "server": "node dist/server.js",
+    "cli": "node dist/cli.js",
+    "dev:server": "node --experimental-strip-types src/server.ts",
+    "dev:cli": "node --experimental-strip-types src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "rag",
+    "journal",
+    "bm25",
+    "search",
+    "knowledge-base"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

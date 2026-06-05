@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local, rebuilt-on-startup index cache. Never committed (see plan: nothing generated in git).
+.journal-rag/
