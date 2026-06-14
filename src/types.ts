@@ -1,6 +1,7 @@
 export interface JournalRagConfig {
   sources: string[];
   cachePath?: string;
+  embeddingModel?: string;
 }
 
 export interface Chunk {

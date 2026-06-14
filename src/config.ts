@@ -40,6 +40,7 @@ export function loadConfig(workspaceRoot: string): JournalRagConfig {
   return {
     sources: parsed.sources,
     cachePath: parsed.cachePath ?? ".journal-rag/index.json",
+    embeddingModel: parsed.embeddingModel,
   };
 }
 

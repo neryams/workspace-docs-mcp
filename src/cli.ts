@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { findWorkspaceRoot, loadConfig } from "./config.js";
+import { findWorkspaceRoot, loadConfig, resolveCachePath } from "./config.js";
+import { buildVectorIndex } from "./embeddings.js";
 import { loadJournalIndex, readEntry } from "./index.js";
-import { searchJournal, searchRegex } from "./search.js";
+import { searchHybrid, searchJournal, searchRegex } from "./search.js";
 
 function usage(): void {
   console.error(`Usage:
@@ -61,8 +62,18 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const k = readFlag("--k", 8);
-    const hits = searchJournal(index.chunks, query, k);
-    console.log(JSON.stringify({ query, hits }, null, 2));
+    const bm25Only = args.includes("--bm25");
+    if (bm25Only) {
+      const hits = searchJournal(index.chunks, query, k);
+      console.log(JSON.stringify({ query, hits }, null, 2));
+    } else {
+      const cachePath = resolveCachePath(workspaceRoot, config);
+      const vectorIndex = await buildVectorIndex(index.chunks, cachePath, {
+        model: config.embeddingModel,
+      });
+      const hits = await searchHybrid(index.chunks, vectorIndex, query, k);
+      console.log(JSON.stringify({ query, hits }, null, 2));
+    }
     return;
   }
 

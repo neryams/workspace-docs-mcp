@@ -1,6 +1,8 @@
 # journal-rag
 
-Source-control-friendly **keyword** retrieval over team markdown journals. No vector DB, no embeddings: heading-chunked **BM25** + regex, index built in memory on startup (optional gitignored JSON cache).
+Source-control-friendly **hybrid retrieval** over team markdown journals. Heading-chunked **BM25 + local vector embeddings** fused via Reciprocal Rank Fusion (RRF), with regex as an escape hatch. Index built on startup with an optional gitignored JSON cache.
+
+Embeddings run locally via `@huggingface/transformers` (default model: `all-MiniLM-L6-v2`) — no API keys, no external calls.
 
 Each consuming repo commits `journal-rag.config.json` and markdown under `docs/journal/` (or other configured folders). This package is the shared engine.
 
@@ -11,9 +13,18 @@ Create `journal-rag.config.json` at the repo root:
 ```json
 {
   "sources": ["docs/journal"],
-  "cachePath": ".journal-rag/index.json"
+  "cachePath": ".journal-rag/index.json",
+  "embeddingModel": "Xenova/all-MiniLM-L6-v2"
 }
 ```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `sources` | yes | — | Directories containing markdown journals |
+| `cachePath` | no | `.journal-rag/index.json` | BM25 chunk index cache path |
+| `embeddingModel` | no | `Xenova/all-MiniLM-L6-v2` | Hugging Face model ID for local embeddings |
+
+The vector cache (`vectors.json`) is stored in the same directory as `cachePath`.
 
 Add to `.gitignore`:
 
@@ -44,21 +55,24 @@ Alternative to link: `npm install -g .` from this repo (same effect).
 From a repo root with config:
 
 ```bash
-node c:/repos/journal-rag/dist/cli.js search "HttpFacade singleton"
-node c:/repos/journal-rag/dist/cli.js list --filter dialog
-node c:/repos/journal-rag/dist/cli.js get docs/journal/2026-04-21_vapp-http-facade-and-singleton-sweep.md
-node c:/repos/journal-rag/dist/cli.js index --rebuild
+journal search "HttpFacade singleton"        # hybrid BM25 + vector (default)
+journal search "HttpFacade singleton" --bm25 # BM25-only (no embedding)
+journal list --filter dialog
+journal get docs/journal/2026-04-21_vapp-http-facade-and-singleton-sweep.md
+journal index --rebuild
 ```
 
 After `npm link` in this repo, `journal search "..."` works globally.
 
 Set `JOURNAL_RAG_WORKSPACE` to an absolute repo root only when you must run the CLI from a subdirectory.
 
+The first run downloads the embedding model (~80 MB) to the Hugging Face cache directory. Subsequent runs load from cache.
+
 ## MCP tools
 
 | Tool | Purpose |
 |------|---------|
-| `search_journal` | BM25 + substring fallback (`query`, `k`) |
+| `search_journal` | Hybrid BM25 + vector search with RRF fusion (`query`, `k`). Falls back to BM25-only if vector index is unavailable. |
 | `get_entry` | Full file by path or filename |
 | `list_entries` | Browse metadata (`filter` optional) |
 | `search_regex` | Exact / path / symbol lookup |
@@ -126,5 +140,7 @@ If an editor cannot set cwd per workspace, set env `JOURNAL_RAG_WORKSPACE` to th
 ## Design notes
 
 - Corpus is small (~tens of files); BM25 over heading chunks matches how journals are written.
-- Index cache is optional and gitignored; markdown in git is the source of truth.
-- Hybrid embeddings can be added later without changing the MCP tool surface.
+- Vector embeddings (local, via Transformers.js) add semantic recall for paraphrased or conceptual queries.
+- Reciprocal Rank Fusion (RRF, k=60) merges BM25 and vector rankings without needing score normalization.
+- Index caches are optional and gitignored; markdown in git is the source of truth.
+- Vector cache is incremental — only new/changed chunks are re-embedded on rebuild.

@@ -1,7 +1,10 @@
+import type { VectorIndex } from "./embeddings.js";
+import { searchVector } from "./embeddings.js";
 import type { Chunk, SearchHit } from "./types.js";
 
 const K1 = 1.2;
 const B = 0.75;
+const RRF_K = 60;
 
 export function tokenize(text: string): string[] {
   return text.toLowerCase().match(/[a-z0-9_]+/g) ?? [];
@@ -164,4 +167,64 @@ export function searchRegex(
   }
 
   return hits;
+}
+
+export async function searchHybrid(
+  chunks: Chunk[],
+  vectorIndex: VectorIndex,
+  query: string,
+  k: number,
+): Promise<SearchHit[]> {
+  const expandedK = Math.min(chunks.length, k * 3);
+
+  const bm25Hits = searchBm25(chunks, query, expandedK);
+  const vectorHits = await searchVector(chunks, vectorIndex, query, expandedK);
+
+  const rrfScores = new Map<string, { score: number; chunkIdx: number }>();
+
+  for (let rank = 0; rank < bm25Hits.length; rank++) {
+    const hit = bm25Hits[rank];
+    const key = `${hit.file}\0${hit.heading}`;
+    const prev = rrfScores.get(key);
+    const rrfScore = 1 / (RRF_K + rank + 1);
+    if (prev) {
+      prev.score += rrfScore;
+    } else {
+      const chunkIdx = chunks.findIndex(
+        (c) => c.file === hit.file && c.heading === hit.heading,
+      );
+      rrfScores.set(key, { score: rrfScore, chunkIdx });
+    }
+  }
+
+  for (let rank = 0; rank < vectorHits.length; rank++) {
+    const { chunkIndex } = vectorHits[rank];
+    const chunk = chunks[chunkIndex];
+    const key = `${chunk.file}\0${chunk.heading}`;
+    const prev = rrfScores.get(key);
+    const rrfScore = 1 / (RRF_K + rank + 1);
+    if (prev) {
+      prev.score += rrfScore;
+    } else {
+      rrfScores.set(key, { score: rrfScore, chunkIdx: chunkIndex });
+    }
+  }
+
+  const queryTerms = tokenize(query);
+  const results = [...rrfScores.entries()]
+    .sort((a, b) => b[1].score - a[1].score)
+    .slice(0, k)
+    .map(([_, { score, chunkIdx }]) => {
+      const chunk = chunks[chunkIdx];
+      return {
+        file: chunk.file,
+        heading: chunk.heading,
+        headingPath: chunk.headingPath,
+        snippet: makeSnippet(chunk.text, queryTerms),
+        score,
+        citation: citation(chunk.file, chunk.heading, chunk.headingPath),
+      };
+    });
+
+  return results;
 }
