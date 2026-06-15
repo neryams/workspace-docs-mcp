@@ -1,0 +1,4 @@
+{
+  "sources": ["docs/journal"],
+  "cachePath": ".journal-rag/index.json"
+}

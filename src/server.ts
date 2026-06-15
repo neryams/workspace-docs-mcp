@@ -8,19 +8,16 @@ import { loadJournalIndex, readEntry } from "./index.js";
 import { searchHybrid, searchJournal, searchRegex } from "./search.js";
 
 async function main(): Promise<void> {
+  console.error("[journal-rag] Starting...");
   const workspaceRoot = findWorkspaceRoot();
+  console.error(`[journal-rag] Workspace root: ${workspaceRoot}`);
   const config = loadConfig(workspaceRoot);
+  console.error(`[journal-rag] Config loaded (sources: ${config.sources.join(", ")}, model: ${config.embeddingModel ?? "default"})`);
   const index = loadJournalIndex(workspaceRoot, config);
+  console.error(`[journal-rag] Journal index loaded: ${index.entries.length} entries, ${index.chunks.length} chunks`);
   const cachePath = resolveCachePath(workspaceRoot, config);
 
   let vectorIndex: VectorIndex | null = null;
-  try {
-    vectorIndex = await buildVectorIndex(index.chunks, cachePath, {
-      model: config.embeddingModel,
-    });
-  } catch (err) {
-    console.error("Vector index build failed, falling back to BM25-only:", err);
-  }
 
   const server = new McpServer({
     name: "journal-rag",
@@ -123,6 +120,22 @@ async function main(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  console.error("[journal-rag] MCP server running on stdio");
+
+  // Build vector index in the background after transport is connected,
+  // so the server responds to the MCP handshake immediately.
+  (async () => {
+    try {
+      const t0 = Date.now();
+      console.error("[journal-rag] Building vector index...");
+      vectorIndex = await buildVectorIndex(index.chunks, cachePath, {
+        model: config.embeddingModel,
+      });
+      console.error(`[journal-rag] Vector index ready (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    } catch (err) {
+      console.error("[journal-rag] Vector index build failed, falling back to BM25-only:", err);
+    }
+  })();
 }
 
 main().catch((err: unknown) => {

@@ -1,0 +1,9 @@
+{
+    "journal": {
+        "command": "journal-mcp",
+        "cwd": "${workspaceFolder}",
+        "env": {
+            "JOURNAL_RAG_WORKSPACE": "${workspaceFolder}"
+        }
+    }
+}

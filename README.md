@@ -2,7 +2,7 @@
 
 Source-control-friendly **hybrid retrieval** over team markdown journals. Heading-chunked **BM25 + local vector embeddings** fused via Reciprocal Rank Fusion (RRF), with regex as an escape hatch. Index built on startup with an optional gitignored JSON cache.
 
-Embeddings run locally via `@huggingface/transformers` (default model: `all-MiniLM-L6-v2`) — no API keys, no external calls.
+Embeddings run locally via `@huggingface/transformers` (default model: `Qwen3-Embedding-0.6B`) — no API keys, no external calls.
 
 Each consuming repo commits `journal-rag.config.json` and markdown under `docs/journal/` (or other configured folders). This package is the shared engine.
 
@@ -14,7 +14,7 @@ Create `journal-rag.config.json` at the repo root:
 {
   "sources": ["docs/journal"],
   "cachePath": ".journal-rag/index.json",
-  "embeddingModel": "Xenova/all-MiniLM-L6-v2"
+  "embeddingModel": "onnx-community/Qwen3-Embedding-0.6B-ONNX"
 }
 ```
 
@@ -22,7 +22,7 @@ Create `journal-rag.config.json` at the repo root:
 |-------|----------|---------|-------------|
 | `sources` | yes | — | Directories containing markdown journals |
 | `cachePath` | no | `.journal-rag/index.json` | BM25 chunk index cache path |
-| `embeddingModel` | no | `Xenova/all-MiniLM-L6-v2` | Hugging Face model ID for local embeddings |
+| `embeddingModel` | no | `onnx-community/Qwen3-Embedding-0.6B-ONNX` | Hugging Face model ID for local embeddings |
 
 The vector cache (`vectors.json`) is stored in the same directory as `cachePath`.
 
@@ -66,7 +66,7 @@ After `npm link` in this repo, `journal search "..."` works globally.
 
 Set `JOURNAL_RAG_WORKSPACE` to an absolute repo root only when you must run the CLI from a subdirectory.
 
-The first run downloads the embedding model (~80 MB) to the Hugging Face cache directory. Subsequent runs load from cache.
+The first run downloads the embedding model (~614 MB, quantized int8) to the Hugging Face cache directory. Subsequent runs load from cache.
 
 ## MCP tools
 

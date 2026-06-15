@@ -2,8 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { Chunk } from "./types.js";
 
-const VECTOR_CACHE_VERSION = 1;
-const DEFAULT_MODEL = "Xenova/all-MiniLM-L6-v2";
+const VECTOR_CACHE_VERSION = 2;
+const DEFAULT_MODEL = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+const QUERY_INSTRUCT =
+  "Given a search query, retrieve relevant journal entries that answer the query";
 
 interface VectorCacheEntry {
   key: string;
@@ -39,26 +41,42 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-let pipelineInstance: ((texts: string[], options?: { pooling: "mean" | "cls" | "none"; normalize: boolean }) => Promise<{ tolist: () => number[][] }>) | null = null;
+type EmbedOptions = { pooling: string; normalize: boolean };
+type Embedder = (
+  texts: string[],
+  options?: EmbedOptions,
+) => Promise<{ tolist: () => number[][] }>;
 
-async function getEmbedder(model: string) {
+let pipelineInstance: Embedder | null = null;
+
+async function getEmbedder(model: string): Promise<Embedder> {
   if (pipelineInstance) {
     return pipelineInstance;
   }
   const { pipeline } = await import("@huggingface/transformers");
   const extractor = await pipeline("feature-extraction", model, {
-    dtype: "fp32",
+    dtype: "q8",
   });
-  pipelineInstance = async (texts: string[], options?: { pooling: "mean" | "cls" | "none"; normalize: boolean }) => {
-    const result = await extractor(texts, options);
+  pipelineInstance = async (texts: string[], options?: EmbedOptions) => {
+    const result = await extractor(texts, options as Record<string, unknown>);
     return result as unknown as { tolist: () => number[][] };
   };
   return pipelineInstance;
 }
 
-async function embed(texts: string[], model: string): Promise<number[][]> {
+async function embed(
+  texts: string[],
+  model: string,
+  options?: { queryInstruct?: string },
+): Promise<number[][]> {
   const extractor = await getEmbedder(model);
-  const output = await extractor(texts, { pooling: "mean", normalize: true });
+  const input = options?.queryInstruct
+    ? texts.map((t) => `Instruct: ${options.queryInstruct}\nQuery:${t}`)
+    : texts;
+  const output = await extractor(input, {
+    pooling: "last_token",
+    normalize: true,
+  });
   return output.tolist();
 }
 
@@ -141,7 +159,7 @@ export async function buildVectorIndex(
       const batchIndices = missingIndices.slice(batchStart, batchStart + BATCH_SIZE);
       const texts = batchIndices.map((i) => {
         const chunk = chunks[i];
-        return `${chunk.heading}\n${chunk.text}`.slice(0, 512);
+        return `${chunk.heading}\n${chunk.text}`.slice(0, 2048);
       });
       const embeddings = await embed(texts, model);
       for (let j = 0; j < batchIndices.length; j++) {
@@ -173,7 +191,9 @@ export async function searchVector(
   query: string,
   k: number,
 ): Promise<{ chunkIndex: number; score: number }[]> {
-  const queryEmbedding = await embed([query], vectorIndex.model);
+  const queryEmbedding = await embed([query], vectorIndex.model, {
+    queryInstruct: QUERY_INSTRUCT,
+  });
   const queryVec = new Float32Array(queryEmbedding[0]);
 
   const scored: { chunkIndex: number; score: number }[] = [];
