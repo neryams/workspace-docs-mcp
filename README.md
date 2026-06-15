@@ -73,6 +73,7 @@ The first run downloads the embedding model (~614 MB, quantized int8) to the Hug
 | Tool | Purpose |
 |------|---------|
 | `search_journal` | Hybrid BM25 + vector search with RRF fusion (`query`, `k`). Falls back to BM25-only if vector index is unavailable. |
+| `write_entry` | Create a new journal entry (`title`, `content`). Auto-generates dated filename, incrementally updates the vector index. |
 | `get_entry` | Full file by path or filename |
 | `list_entries` | Browse metadata (`filter` optional) |
 | `search_regex` | Exact / path / symbol lookup |

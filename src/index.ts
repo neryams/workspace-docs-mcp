@@ -6,7 +6,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { resolveCachePath, resolveSourceDirs } from "./config.js";
 import type {
   Chunk,
@@ -292,4 +292,35 @@ export function readEntry(
   }
 
   throw new Error(`Journal entry not found: ${pathArg}`);
+}
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+export function writeEntry(
+  workspaceRoot: string,
+  config: JournalRagConfig,
+  title: string,
+  content: string,
+): { file: string; absPath: string } {
+  const sourceDir = resolveSourceDirs(workspaceRoot, config)[0];
+  mkdirSync(sourceDir, { recursive: true });
+
+  const date = new Date().toISOString().slice(0, 10);
+  const slug = slugify(title);
+  const filename = `${date}_${slug}.md`;
+  const absPath = join(sourceDir, filename);
+
+  if (existsSync(absPath)) {
+    throw new Error(`Journal entry already exists: ${filename}`);
+  }
+
+  writeFileSync(absPath, content, "utf8");
+  const fileRel = relative(workspaceRoot, absPath).replace(/\\/g, "/");
+  return { file: fileRel, absPath };
 }

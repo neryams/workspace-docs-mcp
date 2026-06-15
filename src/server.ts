@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { findWorkspaceRoot, loadConfig, resolveCachePath } from "./config.js";
 import { buildVectorIndex, type VectorIndex } from "./embeddings.js";
-import { loadJournalIndex, readEntry } from "./index.js";
+import { loadJournalIndex, readEntry, writeEntry } from "./index.js";
 import { searchHybrid, searchJournal, searchRegex } from "./search.js";
 
 async function main(): Promise<void> {
@@ -13,7 +13,7 @@ async function main(): Promise<void> {
   console.error(`[journal-rag] Workspace root: ${workspaceRoot}`);
   const config = loadConfig(workspaceRoot);
   console.error(`[journal-rag] Config loaded (sources: ${config.sources.join(", ")}, model: ${config.embeddingModel ?? "default"})`);
-  const index = loadJournalIndex(workspaceRoot, config);
+  let index = loadJournalIndex(workspaceRoot, config);
   console.error(`[journal-rag] Journal index loaded: ${index.entries.length} entries, ${index.chunks.length} chunks`);
   const cachePath = resolveCachePath(workspaceRoot, config);
 
@@ -112,6 +112,42 @@ async function main(): Promise<void> {
           {
             type: "text" as const,
             text: JSON.stringify({ pattern, hits }, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "write_entry",
+    {
+      description:
+        "Create a new markdown journal entry. Filename is generated from today's date and the title slug. Returns the file path. The vector index is incrementally updated (only new chunks are embedded).",
+      inputSchema: z.object({
+        title: z.string().describe("Entry title (used for H1 heading and filename slug)"),
+        content: z.string().describe("Full markdown content of the journal entry (should start with # Title)"),
+      }),
+    },
+    async ({ title, content }) => {
+      const { file } = writeEntry(workspaceRoot, config, title, content);
+
+      index = loadJournalIndex(workspaceRoot, config, { forceRebuild: true });
+
+      if (vectorIndex) {
+        try {
+          vectorIndex = await buildVectorIndex(index.chunks, cachePath, {
+            model: config.embeddingModel,
+          });
+        } catch (err) {
+          console.error("[journal-rag] Incremental vector index update failed:", err);
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ created: file }, null, 2),
           },
         ],
       };
