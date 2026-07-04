@@ -1,0 +1,35 @@
+---
+alwaysApply: true
+---
+
+## Team journal (journal-rag MCP)
+
+This workspace has a **journal MCP server** named `journal` (configured in `.cursor/mcp.json`). It searches and writes markdown journal files under `docs/journal/` (or paths in `journal-rag.config.json`).
+
+**Valid tool names only:**
+- `search_journal` — semantic + keyword search (param: `query`, optional `k`)
+- `list_entries` — browse all entries (optional `filter`)
+- `get_entry` — read one file by path (param: `path`)
+- `write_entry` — create a new entry (`title`, `content`)
+- `search_regex` — exact/symbol lookup (param: `pattern`, optional `k`)
+
+### When to use the journal
+
+- **Before** starting a non-trivial task: `search_journal` for past decisions, failed approaches, and preferences.
+- **During** work: if you hit a reusable insight, gotcha, or architectural decision, note it for a journal entry at the end.
+- **After** completing meaningful work: `write_entry` to capture what worked, what failed, and why — so future sessions benefit.
+- Use `search_regex` when you need exact identifiers, file paths, or symbols that semantic search might miss.
+
+### Writing entries
+
+Use `write_entry` with full markdown content starting with `# Title`. Good things to capture:
+- Technical insights and debugging lessons
+- Architectural decisions and their rationale
+- User preferences and communication patterns
+- Approaches that failed and why (avoid repeating them)
+
+Keep entries concise and factual. The journal is team-visible markdown in git, not a private feelings log.
+
+### Scope discipline
+
+Do not fix unrelated issues you notice during a task — document them in a journal entry instead (or mention them to the user).
