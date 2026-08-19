@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { withIndexingLock } from "./indexing-lock.js";
+import { writeError, writeLog } from "./logger.js";
 import type { Chunk } from "./types.js";
 
 const VECTOR_CACHE_VERSION = 2;
 const DEFAULT_MODEL = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
-const EMBEDDING_BATCH_SIZE = 8;
+const EMBEDDING_BATCH_SIZE = 1;
+const VECTOR_CHECKPOINT_INTERVAL = 100;
 const QUERY_INSTRUCT =
   "Given a search query, retrieve relevant journal entries that answer the query";
 
@@ -49,7 +51,22 @@ type Embedder = (
   options?: EmbedOptions,
 ) => Promise<{ tolist: () => number[][] }>;
 
-let pipelineInstance: Embedder | null = null;
+const pipelineInstances = new Map<string, Promise<Embedder>>();
+let inferenceTail: Promise<void> = Promise.resolve();
+
+async function serializeInference<T>(task: () => Promise<T>): Promise<T> {
+  const previous = inferenceTail;
+  let release!: () => void;
+  inferenceTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
 
 function embeddingDevice(): "dml" | "coreml" | "cpu" {
   if (process.platform === "win32") {
@@ -62,19 +79,64 @@ function embeddingDevice(): "dml" | "coreml" | "cpu" {
 }
 
 async function getEmbedder(model: string): Promise<Embedder> {
-  if (pipelineInstance) {
-    return pipelineInstance;
+  const existing = pipelineInstances.get(model);
+  if (existing) {
+    return existing;
   }
-  const { pipeline } = await import("@huggingface/transformers");
-  const extractor = await pipeline("feature-extraction", model, {
-    dtype: "q8",
-    device: embeddingDevice(),
+
+  const loading: Promise<Embedder> = serializeInference<Embedder>(async () => {
+    const device = embeddingDevice();
+    const startedAt = Date.now();
+    writeLog("daemon", "info", "Embedding model load started", {
+      model,
+      device,
+    });
+    const { pipeline } = await import("@huggingface/transformers");
+    const extractor = await pipeline("feature-extraction", model, {
+      dtype: "q8",
+      device,
+      session_options:
+        device === "dml"
+          ? {
+              enableMemPattern: false,
+              executionMode: "sequential",
+            }
+          : undefined,
+    });
+    const memory = process.memoryUsage();
+    writeLog("daemon", "info", "Embedding model load completed", {
+      model,
+      device,
+      durationMs: Date.now() - startedAt,
+      rssMiB: Math.round(memory.rss / 1024 / 1024),
+      heapUsedMiB: Math.round(memory.heapUsed / 1024 / 1024),
+      externalMiB: Math.round(memory.external / 1024 / 1024),
+    });
+    const embedder: Embedder = async (
+      texts: string[],
+      options?: EmbedOptions,
+    ) => {
+      return serializeInference(async () => {
+        const result = await extractor(
+          texts,
+          options as Record<string, unknown>,
+        );
+        return result as unknown as { tolist: () => number[][] };
+      });
+    };
+    return embedder;
   });
-  pipelineInstance = async (texts: string[], options?: EmbedOptions) => {
-    const result = await extractor(texts, options as Record<string, unknown>);
-    return result as unknown as { tolist: () => number[][] };
-  };
-  return pipelineInstance;
+  pipelineInstances.set(model, loading);
+  try {
+    return await loading;
+  } catch (error) {
+    pipelineInstances.delete(model);
+    writeError("daemon", "Embedding model load failed", error, {
+      model,
+      device: embeddingDevice(),
+    });
+    throw error;
+  }
 }
 
 async function embed(
@@ -120,19 +182,38 @@ function readVectorCache(path: string, model: string): Map<string, number[]> | n
 function writeVectorCache(
   path: string,
   model: string,
-  index: VectorIndex,
+  embeddings: Map<string, number[]>,
 ): void {
   mkdirSync(dirname(path), { recursive: true });
-  const entries: VectorCacheEntry[] = index.keys.map((key, i) => ({
-    key,
-    embedding: Array.from(index.embeddings[i]),
-  }));
+  const entries: VectorCacheEntry[] = Array.from(
+    embeddings,
+    ([key, embedding]) => ({
+      key,
+      embedding,
+    }),
+  );
   const payload: VectorCacheFile = {
     version: VECTOR_CACHE_VERSION,
     model,
     entries,
   };
   writeFileSync(path, JSON.stringify(payload), "utf8");
+}
+
+function checkpointVectorCache(
+  path: string,
+  model: string,
+  embeddings: Map<string, number[]>,
+): void {
+  try {
+    writeVectorCache(path, model, embeddings);
+  } catch (error) {
+    writeError("daemon", "Vector cache checkpoint failed", error, {
+      path,
+      model,
+      entries: embeddings.size,
+    });
+  }
 }
 
 interface BuildVectorIndexOptions {
@@ -185,9 +266,35 @@ async function buildVectorIndexUnlocked(
         const chunk = chunks[i];
         return `${chunk.heading}\n${chunk.text}`.slice(0, 2048);
       });
-      const embeddings = await embed(texts, model);
+      let embeddings: number[][];
+      try {
+        embeddings = await embed(texts, model);
+      } catch (error) {
+        checkpointVectorCache(cachePath, model, newEmbeddings);
+        writeError("daemon", "Embedding batch failed", error, {
+          model,
+          batchStart,
+          batchSize: batchIndices.length,
+          totalMissing: missingIndices.length,
+        });
+        throw error;
+      }
       for (let j = 0; j < batchIndices.length; j++) {
         newEmbeddings.set(keys[batchIndices[j]], embeddings[j]);
+      }
+      const completed = batchStart + batchIndices.length;
+      if (
+        completed === missingIndices.length ||
+        completed % VECTOR_CHECKPOINT_INTERVAL === 0
+      ) {
+        checkpointVectorCache(cachePath, model, newEmbeddings);
+      }
+      if (completed === missingIndices.length || completed % 50 === 0) {
+        writeLog("daemon", "info", "Embedding progress", {
+          model,
+          completed,
+          totalMissing: missingIndices.length,
+        });
       }
     }
   }
@@ -205,7 +312,7 @@ async function buildVectorIndexUnlocked(
   });
 
   const index: VectorIndex = { model, keys, embeddings };
-  writeVectorCache(cachePath, model, index);
+  writeVectorCache(cachePath, model, newEmbeddings);
   return index;
 }
 

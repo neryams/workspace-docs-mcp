@@ -1,23 +1,26 @@
 #!/usr/bin/env node
+import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { findWorkspaceRoot, loadConfig, resolveCachePath } from "./config.js";
-import { buildVectorIndex, type VectorIndex } from "./embeddings.js";
-import { loadJournalIndex, readEntry, writeEntry } from "./index.js";
-import { searchHybrid, searchJournal, searchRegex } from "./search.js";
+import { callDaemon } from "./daemon-client.js";
+import { CONFIG_FILENAME, findWorkspaceRoot } from "./config.js";
+import { LOG_DIR, writeError, writeLog } from "./logger.js";
+
+function jsonText(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
 
 async function main(): Promise<void> {
   console.error("[journal-rag] Starting...");
   const workspaceRoot = findWorkspaceRoot();
+  const configPath = join(workspaceRoot, CONFIG_FILENAME);
   console.error(`[journal-rag] Workspace root: ${workspaceRoot}`);
-  const config = loadConfig(workspaceRoot);
-  console.error(`[journal-rag] Config loaded (sources: ${config.sources.join(", ")}, model: ${config.embeddingModel ?? "default"})`);
-  let index = loadJournalIndex(workspaceRoot, config);
-  console.error(`[journal-rag] Journal index loaded: ${index.entries.length} entries, ${index.chunks.length} chunks`);
-  const cachePath = resolveCachePath(workspaceRoot, config);
-
-  let vectorIndex: VectorIndex | null = null;
+  console.error(`[journal-rag] Logs: ${LOG_DIR}`);
+  writeLog("mcp", "info", "MCP proxy starting", {
+    workspaceRoot,
+    configPath,
+  });
 
   const server = new McpServer({
     name: "journal-rag",
@@ -35,15 +38,15 @@ async function main(): Promise<void> {
       }),
     },
     async ({ query, k }) => {
-      const limit = k ?? 8;
-      const hits = vectorIndex
-        ? await searchHybrid(index.chunks, vectorIndex, query, limit)
-        : searchJournal(index.chunks, query, limit);
+      const result = await callDaemon("search_journal", configPath, {
+        query,
+        k: k ?? 8,
+      });
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ query, hits }, null, 2),
+            text: jsonText(result),
           },
         ],
       };
@@ -59,9 +62,9 @@ async function main(): Promise<void> {
       }),
     },
     async ({ path }) => {
-      const content = readEntry(workspaceRoot, config, path);
+      const content = await callDaemon("get_entry", configPath, { path });
       return {
-        content: [{ type: "text" as const, text: content }],
+        content: [{ type: "text" as const, text: String(content) }],
       };
     },
   );
@@ -76,19 +79,12 @@ async function main(): Promise<void> {
       }),
     },
     async ({ filter }) => {
-      const needle = filter?.toLowerCase();
-      const entries = needle
-        ? index.entries.filter(
-            (e) =>
-              e.file.toLowerCase().includes(needle) ||
-              e.title.toLowerCase().includes(needle),
-          )
-        : index.entries;
+      const result = await callDaemon("list_entries", configPath, { filter });
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ count: entries.length, entries }, null, 2),
+            text: jsonText(result),
           },
         ],
       };
@@ -106,12 +102,15 @@ async function main(): Promise<void> {
       }),
     },
     async ({ pattern, k }) => {
-      const hits = searchRegex(index.chunks, pattern, k ?? 20);
+      const result = await callDaemon("search_regex", configPath, {
+        pattern,
+        k: k ?? 20,
+      });
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ pattern, hits }, null, 2),
+            text: jsonText(result),
           },
         ],
       };
@@ -129,25 +128,15 @@ async function main(): Promise<void> {
       }),
     },
     async ({ title, content }) => {
-      const { file } = writeEntry(workspaceRoot, config, title, content);
-
-      index = loadJournalIndex(workspaceRoot, config, { forceRebuild: true });
-
-      if (vectorIndex) {
-        try {
-          vectorIndex = await buildVectorIndex(index.chunks, cachePath, {
-            model: config.embeddingModel,
-          });
-        } catch (err) {
-          console.error("[journal-rag] Incremental vector index update failed:", err);
-        }
-      }
-
+      const result = await callDaemon("write_entry", configPath, {
+        title,
+        content,
+      });
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ created: file }, null, 2),
+            text: jsonText(result),
           },
         ],
       };
@@ -157,24 +146,16 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[journal-rag] MCP server running on stdio");
+  writeLog("mcp", "info", "MCP proxy connected", { configPath });
 
-  // Build vector index in the background after transport is connected,
-  // so the server responds to the MCP handshake immediately.
-  (async () => {
-    try {
-      const t0 = Date.now();
-      console.error("[journal-rag] Building vector index...");
-      vectorIndex = await buildVectorIndex(index.chunks, cachePath, {
-        model: config.embeddingModel,
-      });
-      console.error(`[journal-rag] Vector index ready (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
-    } catch (err) {
-      console.error("[journal-rag] Vector index build failed, falling back to BM25-only:", err);
-    }
-  })();
+  void callDaemon("ensure_workspace", configPath).catch((error: unknown) => {
+    console.error("[journal-rag] Daemon initialization failed:", error);
+    writeError("mcp", "Daemon initialization failed", error, { configPath });
+  });
 }
 
 main().catch((err: unknown) => {
   console.error(err);
+  writeError("mcp", "MCP proxy fatal error", err);
   process.exit(1);
 });

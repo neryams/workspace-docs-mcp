@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "journal": "dist/cli.js",
-    "journal-mcp": "dist/server.js"
+    "journal-mcp": "dist/server.js",
+    "journal-daemon": "dist/daemon.js"
   },
   "main": "dist/server.js",
   "files": [
@@ -21,6 +22,7 @@
     "watch": "tsc --watch",
     "start": "node dist/server.js",
     "server": "node dist/server.js",
+    "daemon": "node dist/daemon.js",
     "cli": "node dist/cli.js",
     "dev:server": "node --experimental-strip-types src/server.ts",
     "dev:cli": "node --experimental-strip-types src/cli.ts",

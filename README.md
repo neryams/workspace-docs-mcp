@@ -1,6 +1,6 @@
 # journal-rag
 
-Source-control-friendly **hybrid retrieval** over team markdown journals. Heading-chunked **BM25 + local vector embeddings** fused via Reciprocal Rank Fusion (RRF), with regex as an escape hatch. Index built on startup with an optional gitignored JSON cache.
+Source-control-friendly **hybrid retrieval** over team markdown journals. Heading-chunked **BM25 + local vector embeddings** fused via Reciprocal Rank Fusion (RRF), with regex as an escape hatch. A per-user daemon shares models and workspace indexes across MCP clients.
 
 Embeddings run locally via `@huggingface/transformers` (default model: `Qwen3-Embedding-0.6B`) — no API keys, no external calls.
 
@@ -46,6 +46,7 @@ npm link             # puts journal + journal-mcp on your PATH
 |---------|----------------|
 | `journal` | CLI (`search`, `list`, `get`, …) |
 | `journal-mcp` | MCP stdio server (for editor config) |
+| `journal-daemon` | Shared local daemon (normally started automatically) |
 
 Re-run `npm run build` (or `npm link` again) after pulling server changes.
 Alternative to link: `npm install -g .` from this repo (same effect).
@@ -66,7 +67,19 @@ After `npm link` in this repo, `journal search "..."` works globally.
 
 Set `JOURNAL_RAG_WORKSPACE` to an absolute repo root only when you must run the CLI from a subdirectory.
 
-The first run downloads the embedding model (~614 MB, quantized int8) to the Hugging Face cache directory. Subsequent runs load from cache. Embedding inference uses DirectML on Windows, Core ML on macOS, and CPU elsewhere. New chunks are embedded in batches of eight.
+The first run downloads the embedding model (~614 MB, quantized int8) to the Hugging Face cache directory. Subsequent runs load from cache. Embedding inference uses DirectML on Windows, Core ML on macOS, and CPU elsewhere. Indexing uses single-document batches to stay within the memory limits of 6 GB GPUs. DirectML sessions disable memory-pattern optimization and use sequential execution as required by ONNX Runtime. Partial vectors are checkpointed every 100 chunks so an interrupted build can resume.
+
+Each editor still launches a small stdio MCP proxy because stdio cannot be shared between clients. The proxy automatically connects to one per-user daemon over a Windows named pipe or Unix socket. The daemon canonicalizes the path to `journal-rag.config.json`; Cursor, ChatGPT, and other clients using the same config therefore share one workspace runtime, vector build, and model instance. No administrator-level service installation is required.
+
+## Diagnostic logs
+
+The MCP proxy and daemon write daily JSONL logs and retain them for 14 days:
+
+- Windows: `%LOCALAPPDATA%\journal-rag\logs`
+- macOS: `~/Library/Logs/journal-rag`
+- Linux: `$XDG_STATE_HOME/journal-rag/logs` or `~/.local/state/journal-rag/logs`
+
+Set `JOURNAL_RAG_LOG_DIR` to override the directory. Logs include process IDs, canonical config paths, daemon startup and request failures, vector-build timing, selected execution device, model-load timing, and process memory after model loading. Query text and journal content are not logged.
 
 ## MCP tools
 
@@ -146,3 +159,4 @@ If an editor cannot set cwd per workspace, set env `JOURNAL_RAG_WORKSPACE` to th
 - Index caches are optional and gitignored; markdown in git is the source of truth.
 - Vector cache is incremental — only new/changed chunks are re-embedded on rebuild.
 - Vector index builds take a machine-wide lock, so MCP servers opened for different workspaces do not run expensive embedding jobs concurrently. The lock has a heartbeat and is recovered after a crashed or killed process.
+- The daemon owns workspace runtimes keyed by canonical config path. MCP stdio processes contain no model or index state and only forward tool calls.
