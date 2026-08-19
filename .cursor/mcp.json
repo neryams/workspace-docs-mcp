@@ -6,6 +6,6 @@
             "env": {
                 "JOURNAL_RAG_WORKSPACE": "${workspaceFolder}"
             }
-        },
+        }
     }
 }

@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { withIndexingLock } from "./indexing-lock.js";
 import type { Chunk } from "./types.js";
 
 const VECTOR_CACHE_VERSION = 2;
 const DEFAULT_MODEL = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+const EMBEDDING_BATCH_SIZE = 8;
 const QUERY_INSTRUCT =
   "Given a search query, retrieve relevant journal entries that answer the query";
 
@@ -49,6 +51,16 @@ type Embedder = (
 
 let pipelineInstance: Embedder | null = null;
 
+function embeddingDevice(): "dml" | "coreml" | "cpu" {
+  if (process.platform === "win32") {
+    return "dml";
+  }
+  if (process.platform === "darwin") {
+    return "coreml";
+  }
+  return "cpu";
+}
+
 async function getEmbedder(model: string): Promise<Embedder> {
   if (pipelineInstance) {
     return pipelineInstance;
@@ -56,6 +68,7 @@ async function getEmbedder(model: string): Promise<Embedder> {
   const { pipeline } = await import("@huggingface/transformers");
   const extractor = await pipeline("feature-extraction", model, {
     dtype: "q8",
+    device: embeddingDevice(),
   });
   pipelineInstance = async (texts: string[], options?: EmbedOptions) => {
     const result = await extractor(texts, options as Record<string, unknown>);
@@ -122,10 +135,15 @@ function writeVectorCache(
   writeFileSync(path, JSON.stringify(payload), "utf8");
 }
 
-export async function buildVectorIndex(
+interface BuildVectorIndexOptions {
+  forceRebuild?: boolean;
+  model?: string;
+}
+
+async function buildVectorIndexUnlocked(
   chunks: Chunk[],
   bm25CachePath: string,
-  options?: { forceRebuild?: boolean; model?: string },
+  options?: BuildVectorIndexOptions,
 ): Promise<VectorIndex> {
   const model = options?.model ?? DEFAULT_MODEL;
   const cachePath = vectorCachePath(bm25CachePath);
@@ -154,9 +172,15 @@ export async function buildVectorIndex(
   let newEmbeddings: Map<string, number[]> = cached ?? new Map();
 
   if (missingIndices.length > 0) {
-    const BATCH_SIZE = 32;
-    for (let batchStart = 0; batchStart < missingIndices.length; batchStart += BATCH_SIZE) {
-      const batchIndices = missingIndices.slice(batchStart, batchStart + BATCH_SIZE);
+    for (
+      let batchStart = 0;
+      batchStart < missingIndices.length;
+      batchStart += EMBEDDING_BATCH_SIZE
+    ) {
+      const batchIndices = missingIndices.slice(
+        batchStart,
+        batchStart + EMBEDDING_BATCH_SIZE,
+      );
       const texts = batchIndices.map((i) => {
         const chunk = chunks[i];
         return `${chunk.heading}\n${chunk.text}`.slice(0, 2048);
@@ -183,6 +207,16 @@ export async function buildVectorIndex(
   const index: VectorIndex = { model, keys, embeddings };
   writeVectorCache(cachePath, model, index);
   return index;
+}
+
+export async function buildVectorIndex(
+  chunks: Chunk[],
+  bm25CachePath: string,
+  options?: BuildVectorIndexOptions,
+): Promise<VectorIndex> {
+  return withIndexingLock(() =>
+    buildVectorIndexUnlocked(chunks, bm25CachePath, options),
+  );
 }
 
 export async function searchVector(

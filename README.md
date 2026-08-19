@@ -66,7 +66,7 @@ After `npm link` in this repo, `journal search "..."` works globally.
 
 Set `JOURNAL_RAG_WORKSPACE` to an absolute repo root only when you must run the CLI from a subdirectory.
 
-The first run downloads the embedding model (~614 MB, quantized int8) to the Hugging Face cache directory. Subsequent runs load from cache.
+The first run downloads the embedding model (~614 MB, quantized int8) to the Hugging Face cache directory. Subsequent runs load from cache. Embedding inference uses DirectML on Windows, Core ML on macOS, and CPU elsewhere. New chunks are embedded in batches of eight.
 
 ## MCP tools
 
@@ -145,3 +145,4 @@ If an editor cannot set cwd per workspace, set env `JOURNAL_RAG_WORKSPACE` to th
 - Reciprocal Rank Fusion (RRF, k=60) merges BM25 and vector rankings without needing score normalization.
 - Index caches are optional and gitignored; markdown in git is the source of truth.
 - Vector cache is incremental — only new/changed chunks are re-embedded on rebuild.
+- Vector index builds take a machine-wide lock, so MCP servers opened for different workspaces do not run expensive embedding jobs concurrently. The lock has a heartbeat and is recovered after a crashed or killed process.

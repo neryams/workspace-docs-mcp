@@ -1,7 +1,7 @@
 {
   "name": "journal-rag",
   "version": "0.1.0",
-  "description": "Source-control-friendly keyword MCP server + CLI over markdown journals. No vector DB, no embeddings: heading-chunked BM25 + regex, index built in-memory.",
+  "description": "Source-control-friendly hybrid BM25 and local vector search over markdown journals.",
   "type": "module",
   "bin": {
     "journal": "dist/cli.js",
@@ -39,10 +39,12 @@
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "proper-lockfile": "^4.1.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.6.0"
   }
 }
