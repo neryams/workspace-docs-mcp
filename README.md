@@ -2,7 +2,7 @@
 
 Source-control-friendly **hybrid retrieval** over team markdown journals. Heading-chunked **BM25 + local vector embeddings** fused via Reciprocal Rank Fusion (RRF), with regex as an escape hatch. A per-user daemon shares models and workspace indexes across MCP clients.
 
-Embeddings run locally via `@huggingface/transformers` (default model: `Qwen3-Embedding-0.6B`) — no API keys, no external calls.
+Embeddings run locally via `@huggingface/transformers` — no API keys or hosted inference calls.
 
 Each consuming repo commits `journal-rag.config.json` and markdown under `docs/journal/` (or other configured folders). This package is the shared engine.
 
@@ -13,8 +13,7 @@ Create `journal-rag.config.json` at the repo root:
 ```json
 {
   "sources": ["docs/journal"],
-  "cachePath": ".journal-rag/index.json",
-  "embeddingModel": "onnx-community/Qwen3-Embedding-0.6B-ONNX"
+  "cachePath": ".journal-rag/index.json"
 }
 ```
 
@@ -22,7 +21,7 @@ Create `journal-rag.config.json` at the repo root:
 |-------|----------|---------|-------------|
 | `sources` | yes | — | Directories containing markdown journals |
 | `cachePath` | no | `.journal-rag/index.json` | BM25 chunk index cache path |
-| `embeddingModel` | no | `onnx-community/Qwen3-Embedding-0.6B-ONNX` | Hugging Face model ID for local embeddings |
+| `embeddingModel` | no | Platform-specific model | Hugging Face model ID for local embeddings. macOS uses the cache-free `Xenova/all-MiniLM-L6-v2` encoder; other platforms use `onnx-community/Qwen3-Embedding-0.6B-ONNX`. |
 
 The vector cache (`vectors.json`) is stored in the same directory as `cachePath`.
 
@@ -67,7 +66,7 @@ After `npm link` in this repo, `journal search "..."` works globally.
 
 Set `JOURNAL_RAG_WORKSPACE` to an absolute repo root only when you must run the CLI from a subdirectory.
 
-The first run downloads the embedding model (~614 MB, quantized int8) to the Hugging Face cache directory. Subsequent runs load from cache. Embedding inference uses DirectML on Windows, Core ML on macOS, and CPU elsewhere. Indexing uses single-document batches to stay within the memory limits of 6 GB GPUs. DirectML sessions disable memory-pattern optimization and use sequential execution as required by ONNX Runtime. Partial vectors are checkpointed every 100 chunks so an interrupted build can resume.
+The first run downloads a local embedding model (~90 MB on macOS and ~614 MB elsewhere) to the Hugging Face cache directory. Subsequent runs load from cache. Embedding inference uses DirectML on Windows, Core ML on macOS, and CPU elsewhere. macOS uses a cache-free encoder model because Core ML cannot execute the zero-length key/value-cache inputs used by the Qwen ONNX Community export, and cache-free Qwen exports consume several gigabytes when compiled by Core ML. If an accelerated provider fails during model loading or inference, the error is logged and that model is retried on CPU for the lifetime of the daemon. Indexing uses single-document batches to stay within the memory limits of 6 GB GPUs. DirectML sessions disable memory-pattern optimization and use sequential execution as required by ONNX Runtime. Partial vectors are checkpointed every 100 chunks so an interrupted build can resume.
 
 Each editor still launches a small stdio MCP proxy because stdio cannot be shared between clients. The proxy automatically connects to one per-user daemon over a Windows named pipe or Unix socket. The daemon canonicalizes the path to `journal-rag.config.json`; Cursor, ChatGPT, and other clients using the same config therefore share one workspace runtime, vector build, and model instance. No administrator-level service installation is required.
 

@@ -5,7 +5,11 @@ import { writeError, writeLog } from "./logger.js";
 import type { Chunk } from "./types.js";
 
 const VECTOR_CACHE_VERSION = 2;
-const DEFAULT_MODEL = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+const MACOS_DEFAULT_MODEL = "Xenova/all-MiniLM-L6-v2";
+const DEFAULT_MODEL =
+  process.platform === "darwin"
+    ? MACOS_DEFAULT_MODEL
+    : "onnx-community/Qwen3-Embedding-0.6B-ONNX";
 const EMBEDDING_BATCH_SIZE = 1;
 const VECTOR_CHECKPOINT_INTERVAL = 100;
 const QUERY_INSTRUCT =
@@ -50,8 +54,10 @@ type Embedder = (
   texts: string[],
   options?: EmbedOptions,
 ) => Promise<{ tolist: () => number[][] }>;
+type EmbeddingDevice = "dml" | "coreml" | "cpu";
 
 const pipelineInstances = new Map<string, Promise<Embedder>>();
+const modelDeviceOverrides = new Map<string, EmbeddingDevice>();
 let inferenceTail: Promise<void> = Promise.resolve();
 
 async function serializeInference<T>(task: () => Promise<T>): Promise<T> {
@@ -68,7 +74,7 @@ async function serializeInference<T>(task: () => Promise<T>): Promise<T> {
   }
 }
 
-function embeddingDevice(): "dml" | "coreml" | "cpu" {
+function embeddingDevice(): EmbeddingDevice {
   if (process.platform === "win32") {
     return "dml";
   }
@@ -78,22 +84,30 @@ function embeddingDevice(): "dml" | "coreml" | "cpu" {
   return "cpu";
 }
 
-async function getEmbedder(model: string): Promise<Embedder> {
-  const existing = pipelineInstances.get(model);
+function pipelineKey(model: string, device: EmbeddingDevice): string {
+  return `${model}\0${device}`;
+}
+
+async function getEmbedder(
+  model: string,
+  device: EmbeddingDevice,
+): Promise<Embedder> {
+  const key = pipelineKey(model, device);
+  const existing = pipelineInstances.get(key);
   if (existing) {
     return existing;
   }
 
   const loading: Promise<Embedder> = serializeInference<Embedder>(async () => {
-    const device = embeddingDevice();
     const startedAt = Date.now();
     writeLog("daemon", "info", "Embedding model load started", {
       model,
       device,
     });
     const { pipeline } = await import("@huggingface/transformers");
+    const useMiniLmModel = model === MACOS_DEFAULT_MODEL;
     const extractor = await pipeline("feature-extraction", model, {
-      dtype: "q8",
+      dtype: useMiniLmModel ? "fp32" : "q8",
       device,
       session_options:
         device === "dml"
@@ -126,17 +140,30 @@ async function getEmbedder(model: string): Promise<Embedder> {
     };
     return embedder;
   });
-  pipelineInstances.set(model, loading);
+  pipelineInstances.set(key, loading);
   try {
     return await loading;
   } catch (error) {
-    pipelineInstances.delete(model);
+    pipelineInstances.delete(key);
     writeError("daemon", "Embedding model load failed", error, {
       model,
-      device: embeddingDevice(),
+      device,
     });
     throw error;
   }
+}
+
+async function embedWithDevice(
+  texts: string[],
+  model: string,
+  device: EmbeddingDevice,
+): Promise<number[][]> {
+  const extractor = await getEmbedder(model, device);
+  const output = await extractor(texts, {
+    pooling: model === MACOS_DEFAULT_MODEL ? "mean" : "last_token",
+    normalize: true,
+  });
+  return output.tolist();
 }
 
 async function embed(
@@ -144,15 +171,26 @@ async function embed(
   model: string,
   options?: { queryInstruct?: string },
 ): Promise<number[][]> {
-  const extractor = await getEmbedder(model);
-  const input = options?.queryInstruct
+  const input = options?.queryInstruct && model !== MACOS_DEFAULT_MODEL
     ? texts.map((t) => `Instruct: ${options.queryInstruct}\nQuery:${t}`)
     : texts;
-  const output = await extractor(input, {
-    pooling: "last_token",
-    normalize: true,
-  });
-  return output.tolist();
+  const device = modelDeviceOverrides.get(model) ?? embeddingDevice();
+  try {
+    return await embedWithDevice(input, model, device);
+  } catch (error) {
+    if (device === "cpu") {
+      throw error;
+    }
+
+    modelDeviceOverrides.set(model, "cpu");
+    pipelineInstances.delete(pipelineKey(model, device));
+    writeError("daemon", "Embedding device failed; retrying on CPU", error, {
+      model,
+      device,
+      fallbackDevice: "cpu",
+    });
+    return embedWithDevice(input, model, "cpu");
+  }
 }
 
 function vectorCachePath(bm25CachePath: string): string {
@@ -290,10 +328,12 @@ async function buildVectorIndexUnlocked(
         checkpointVectorCache(cachePath, model, newEmbeddings);
       }
       if (completed === missingIndices.length || completed % 50 === 0) {
+        const memory = process.memoryUsage();
         writeLog("daemon", "info", "Embedding progress", {
           model,
           completed,
           totalMissing: missingIndices.length,
+          rssMiB: Math.round(memory.rss / 1024 / 1024),
         });
       }
     }
