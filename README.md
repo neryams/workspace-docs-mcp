@@ -70,6 +70,44 @@ The first run downloads a local embedding model (~90 MB on macOS and ~614 MB els
 
 Each editor still launches a small stdio MCP proxy because stdio cannot be shared between clients. The proxy automatically connects to one per-user daemon over a Windows named pipe or Unix socket. The daemon canonicalizes the path to `journal-rag.config.json`; Cursor, ChatGPT, and other clients using the same config therefore share one workspace runtime, vector build, and model instance. No administrator-level service installation is required.
 
+## Optional CUDA on Linux x64
+
+Set `JOURNAL_RAG_DEVICE=cuda` in the environment **before starting the daemon**.
+Supported overrides are `cpu`, `cuda`, `dml`, and `coreml`; without an override the
+platform defaults above still apply. A running daemon keeps its existing environment.
+
+CUDA uses the Qwen FP16 export (~1.2 GB download), because the q8 export's
+`MatMulInteger` operations execute on CPU even with the CUDA provider selected.
+The vector cache records the embedding precision and is rebuilt when precision
+changes. CPU fallback retains the selected precision so queries and cached vectors
+remain compatible. Custom models must provide the selected export.
+
+The Linux x64 `onnxruntime-node` package includes the CUDA provider, but it also
+needs CUDA 12 and cuDNN 9 runtime libraries visible through `LD_LIBRARY_PATH`.
+A private installation avoids changing system libraries or another project's venv:
+
+```bash
+uv venv .cuda-venv
+uv pip install --python .cuda-venv/bin/python \
+  nvidia-cublas-cu12==12.8.4.1 nvidia-cuda-runtime-cu12==12.8.90 \
+  nvidia-cudnn-cu12==9.19.0.56 nvidia-cufft-cu12==11.3.3.83 \
+  nvidia-curand-cu12==10.3.9.90 nvidia-nvjitlink-cu12==12.8.93
+```
+
+Add the `.cuda-venv/lib/python*/site-packages/nvidia/*/lib` directories to
+`LD_LIBRARY_PATH` when launching Node. Check that `ldd` on
+`node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime_providers_cuda.so`
+reports no missing libraries. Missing native dependencies can terminate the process
+before JavaScript can fall back to CPU.
+
+For side-by-side testing, use a separate Git worktree with its own `npm ci`, a
+private workspace/config and cache, and a private `TMPDIR` directory. `TMPDIR`
+isolates both the daemon socket/startup lock and vector indexing lock on Linux.
+Set `JOURNAL_RAG_LOG_DIR` separately too. Do not relink global binaries or stop the
+existing daemon. In that environment, `node dist/cli.js search "query"` tests the
+CLI and `node dist/server.js` starts the MCP proxy. A first CUDA inference may
+spend a minute compiling kernels; use repeated warm queries for comparisons.
+
 ## Diagnostic logs
 
 The MCP proxy and daemon write daily JSONL logs and retain them for 14 days:

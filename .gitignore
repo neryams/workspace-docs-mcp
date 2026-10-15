@@ -4,3 +4,7 @@ dist/
 
 # Local, rebuilt-on-startup index cache. Never committed (see plan: nothing generated in git).
 .journal-rag/
+
+# Private CUDA runtime and isolated validation workspace
+.cuda-venv/
+.cuda-test/

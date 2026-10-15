@@ -4,7 +4,7 @@ import { withIndexingLock } from "./indexing-lock.js";
 import { writeError, writeLog } from "./logger.js";
 import type { Chunk } from "./types.js";
 
-const VECTOR_CACHE_VERSION = 2;
+const VECTOR_CACHE_VERSION = 3;
 const MACOS_DEFAULT_MODEL = "Xenova/all-MiniLM-L6-v2";
 const DEFAULT_MODEL =
   process.platform === "darwin"
@@ -23,6 +23,7 @@ interface VectorCacheEntry {
 interface VectorCacheFile {
   version: number;
   model: string;
+  dtype: EmbeddingDtype;
   entries: VectorCacheEntry[];
 }
 
@@ -54,7 +55,8 @@ type Embedder = (
   texts: string[],
   options?: EmbedOptions,
 ) => Promise<{ tolist: () => number[][] }>;
-type EmbeddingDevice = "dml" | "coreml" | "cpu";
+type EmbeddingDevice = "dml" | "coreml" | "cuda" | "cpu";
+type EmbeddingDtype = "fp32" | "fp16" | "q8";
 
 const pipelineInstances = new Map<string, Promise<Embedder>>();
 const modelDeviceOverrides = new Map<string, EmbeddingDevice>();
@@ -75,6 +77,13 @@ async function serializeInference<T>(task: () => Promise<T>): Promise<T> {
 }
 
 function embeddingDevice(): EmbeddingDevice {
+  const override = process.env.JOURNAL_RAG_DEVICE?.trim();
+  if (override) {
+    if (!["cpu", "cuda", "dml", "coreml"].includes(override)) {
+      throw new Error(`Unsupported JOURNAL_RAG_DEVICE: ${override}`);
+    }
+    return override as EmbeddingDevice;
+  }
   if (process.platform === "win32") {
     return "dml";
   }
@@ -84,15 +93,27 @@ function embeddingDevice(): EmbeddingDevice {
   return "cpu";
 }
 
-function pipelineKey(model: string, device: EmbeddingDevice): string {
-  return `${model}\0${device}`;
+function embeddingDtype(model: string): EmbeddingDtype {
+  if (model === MACOS_DEFAULT_MODEL) {
+    return "fp32";
+  }
+  return embeddingDevice() === "cuda" ? "fp16" : "q8";
+}
+
+function pipelineKey(
+  model: string,
+  device: EmbeddingDevice,
+  dtype: EmbeddingDtype,
+): string {
+  return `${model}\0${device}\0${dtype}`;
 }
 
 async function getEmbedder(
   model: string,
   device: EmbeddingDevice,
+  dtype: EmbeddingDtype,
 ): Promise<Embedder> {
-  const key = pipelineKey(model, device);
+  const key = pipelineKey(model, device, dtype);
   const existing = pipelineInstances.get(key);
   if (existing) {
     return existing;
@@ -103,11 +124,11 @@ async function getEmbedder(
     writeLog("daemon", "info", "Embedding model load started", {
       model,
       device,
+      dtype,
     });
     const { pipeline } = await import("@huggingface/transformers");
-    const useMiniLmModel = model === MACOS_DEFAULT_MODEL;
     const extractor = await pipeline("feature-extraction", model, {
-      dtype: useMiniLmModel ? "fp32" : "q8",
+      dtype,
       device,
       session_options:
         device === "dml"
@@ -121,6 +142,7 @@ async function getEmbedder(
     writeLog("daemon", "info", "Embedding model load completed", {
       model,
       device,
+      dtype,
       durationMs: Date.now() - startedAt,
       rssMiB: Math.round(memory.rss / 1024 / 1024),
       heapUsedMiB: Math.round(memory.heapUsed / 1024 / 1024),
@@ -157,8 +179,9 @@ async function embedWithDevice(
   texts: string[],
   model: string,
   device: EmbeddingDevice,
+  dtype: EmbeddingDtype,
 ): Promise<number[][]> {
-  const extractor = await getEmbedder(model, device);
+  const extractor = await getEmbedder(model, device, dtype);
   const output = await extractor(texts, {
     pooling: model === MACOS_DEFAULT_MODEL ? "mean" : "last_token",
     normalize: true,
@@ -175,21 +198,22 @@ async function embed(
     ? texts.map((t) => `Instruct: ${options.queryInstruct}\nQuery:${t}`)
     : texts;
   const device = modelDeviceOverrides.get(model) ?? embeddingDevice();
+  const dtype = embeddingDtype(model);
   try {
-    return await embedWithDevice(input, model, device);
+    return await embedWithDevice(input, model, device, dtype);
   } catch (error) {
     if (device === "cpu") {
       throw error;
     }
 
     modelDeviceOverrides.set(model, "cpu");
-    pipelineInstances.delete(pipelineKey(model, device));
+    pipelineInstances.delete(pipelineKey(model, device, dtype));
     writeError("daemon", "Embedding device failed; retrying on CPU", error, {
       model,
       device,
       fallbackDevice: "cpu",
     });
-    return embedWithDevice(input, model, "cpu");
+    return embedWithDevice(input, model, "cpu", dtype);
   }
 }
 
@@ -204,7 +228,11 @@ function readVectorCache(path: string, model: string): Map<string, number[]> | n
   }
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as VectorCacheFile;
-    if (parsed.version !== VECTOR_CACHE_VERSION || parsed.model !== model) {
+    if (
+      parsed.version !== VECTOR_CACHE_VERSION ||
+      parsed.model !== model ||
+      parsed.dtype !== embeddingDtype(model)
+    ) {
       return null;
     }
     const map = new Map<string, number[]>();
@@ -233,6 +261,7 @@ function writeVectorCache(
   const payload: VectorCacheFile = {
     version: VECTOR_CACHE_VERSION,
     model,
+    dtype: embeddingDtype(model),
     entries,
   };
   writeFileSync(path, JSON.stringify(payload), "utf8");

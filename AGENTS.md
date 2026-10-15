@@ -29,8 +29,8 @@ src/
 - **Hybrid retrieval**: `search_journal` fuses BM25 keyword scores with vector cosine similarity using Reciprocal Rank Fusion (RRF, k=60). This avoids score normalization issues.
 - **Shared daemon**: Every editor needs its own lightweight stdio MCP proxy, but all proxies connect to one per-user daemon over a Windows named pipe or Unix socket. No OS service installation is required.
 - **Workspace deduplication**: Daemon runtimes are keyed by the canonical path to `journal-rag.config.json`, so Cursor and ChatGPT share one runtime when they open the same workspace.
-- **Shared local embeddings**: The daemon loads embeddings through `@huggingface/transformers`. macOS uses the cache-free `Xenova/all-MiniLM-L6-v2` encoder; other platforms use `onnx-community/Qwen3-Embedding-0.6B-ONNX`. Model loads and inference calls are serialized; model promises are deduplicated by model ID and device.
-- **Platform acceleration**: Use DirectML on Windows, Core ML on macOS, and CPU elsewhere. DirectML must use `enableMemPattern: false` and sequential execution. If an accelerated provider fails during load or inference, log the original error and use a CPU session for that model for the rest of the daemon lifetime.
+- **Shared local embeddings**: The daemon loads embeddings through `@huggingface/transformers`. macOS uses the cache-free `Xenova/all-MiniLM-L6-v2` encoder; other platforms use `onnx-community/Qwen3-Embedding-0.6B-ONNX`. Model loads and inference calls are serialized; model promises are deduplicated by model ID, device, and precision.
+- **Platform acceleration**: Use DirectML on Windows, Core ML on macOS, and CPU elsewhere by default. `JOURNAL_RAG_DEVICE=cuda` opts Linux x64 into CUDA with FP16; the q8 export leaves matrix operations on CPU. Precision is part of the vector cache identity and is preserved during CPU fallback. DirectML must use `enableMemPattern: false` and sequential execution. If an accelerated provider fails during load or inference, log the original error and use a CPU session for that model for the rest of the daemon lifetime.
 - **Conservative indexing**: Embed one journal chunk per batch. This avoids DirectML device hangs on 6 GB GPUs. A `proper-lockfile` lock serializes vector builds across processes and recovers stale locks.
 - **Incremental vector cache**: Stored at `.journal-rag/vectors.json` alongside the BM25 cache. Only new or missing chunks are embedded, deleted chunks are pruned, and partial results are checkpointed every 100 chunks.
 - **Graceful degradation**: If the vector index fails to build (e.g., model download issue), the server falls back to BM25-only search without crashing.
@@ -63,7 +63,7 @@ Both caches live in the directory specified by `cachePath` in config (default `.
 | File | Contents |
 |------|----------|
 | `index.json` | BM25 chunk index with file fingerprints for invalidation |
-| `vectors.json` | Embedding vectors keyed by `file\0heading`, model name, version |
+| `vectors.json` | Embedding vectors keyed by `file\0heading`, model name, precision, version |
 
 Cache version constants are in `index.ts` (`CACHE_VERSION`) and `embeddings.ts` (`VECTOR_CACHE_VERSION`). Bump these when changing the cache schema.
 
